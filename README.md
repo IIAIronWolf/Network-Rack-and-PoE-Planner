@@ -4,16 +4,17 @@ A browser-based, offline-capable tool for network engineers to visualize switch 
 
 ## Usage
 
-Open [the planner](https://iiAironwolf.github.io/Network-Rack-and-PoE-Planner/) or download `index.html` and open it locally. Import a text capture containing Cisco CLI commands and their output:
+Open [the planner](https://iiAironwolf.github.io/Network-Rack-and-PoE-Planner/) or download `index.html` and open it locally. The planner includes individual Copy buttons and a Copy all button for the following commands. Run them on the switch, then import a text capture containing the prompts and output:
 
 ```text
+terminal length 0
 show inventory
 show switch
 show environment power
 show power inline
 ```
 
-Include the switch prompt. Each capture generates a rack in stack-member order; drag members to match physical placement. Save project JSON, export CSV, or print a report.
+The first command disables pagination for the current CLI session. Include the switch prompt. Each capture generates a rack in stack-member order; drag members to match physical placement. Save project JSON, export CSV, or print a report.
 
 ## Privacy
 
