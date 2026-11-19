@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rack & PoE Planner</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0e1726;color:#e6eef9;font:14px system-ui,sans-serif}header{padding:25px max(20px,4vw);background:#152338;border-bottom:1px solid #30425a}h1{font-size:25px;margin:0 0 6px}h2{font-size:17px;margin:0 0 12px}p{color:#a6b6ce;line-height:1.5}main{max-width:1250px;margin:auto;padding:24px;display:grid;gap:18px;grid-template-columns:minmax(280px,1fr) minmax(0,2fr)}section{background:#172438;border:1px solid #30425a;border-radius:12px;padding:18px;min-width:0}textarea,input{background:#0e1726;color:#e6eef9;border:1px solid #40536b;border-radius:7px;padding:10px;width:100%;font:inherit}textarea{min-height:190px;font:12px monospace;resize:vertical}button,label.file{cursor:pointer;background:#2563eb;border:0;border-radius:6px;padding:9px 13px;color:white;font:600 13px system-ui;display:inline-block}button.secondary,label.file{background:#30445f}button:hover,label.file:hover{filter:brightness(1.2)}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}.rack{border:5px solid #40536b;border-radius:8px;background:#0b111b;padding:8px;display:grid;gap:7px}.switch{padding:12px;border-radius:6px;background:#1c293a;border-left:5px solid var(--status);cursor:grab}.switch:active{cursor:grabbing}.switch strong{font-size:15px}.badge{color:var(--status);font-weight:700}.stats{display:flex;gap:15px;flex-wrap:wrap;margin:8px 0;color:#c4d1e2}.bar{height:7px;border-radius:5px;background:#344358;overflow:hidden}.bar span{display:block;background:var(--status);height:100%}.psus{display:flex;gap:5px;margin-top:8px}.psu{border:1px solid #668099;border-radius:4px;padding:4px 7px;font-size:11px}.empty{border-style:dashed;color:#a6b6ce}.ports{display:flex;gap:3px;flex-wrap:wrap;margin-top:8px}.port{width:13px;height:10px;border-radius:2px;background:#435167}.port.on{background:#34d399}.port.deny{background:#f87171}.port.fault{background:#fbbf24}details{margin-top:8px;color:#a6b6ce}summary{cursor:pointer}.small{font-size:12px;color:#9bb0ca}.racktitle{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:16px 0 7px}.racktitle input{max-width:340px}#overview{display:flex;gap:10px;flex-wrap:wrap}.metric{background:#0e1726;padding:12px;border-radius:8px;flex:1;min-width:100px}.metric b{font-size:22px;display:block}#message{white-space:pre-wrap;color:#fbbf24}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:7px;border-bottom:1px solid #344358}button[disabled]{opacity:.5;cursor:default}@media(max-width:800px){main{grid-template-columns:1fr}}@media print{body{background:white;color:black}header,section{background:white;color:black;border-color:#ccc}main{display:block}#importer,.controls,button{display:none}.switch{background:#eee;color:black;break-inside:avoid}.stats,.small,p{color:#333}.metric{background:#eee}.rack{background:white}.badge{color:black}}
+</style>
+<header><h1>Rack &amp; PoE Planner <span class="small">v0.1 · Offline</span></h1><div class="small">Cisco Catalyst 9200 / 9200L · Read-only CLI capture analysis · No network requests</div></header>
+<main><section id="importer"><h2>Import switch capture</h2><p>Paste or select a text file containing <code>show inventory</code>, <code>show switch</code>, <code>show environment power</code> and <code>show power inline</code>. Include the switch prompt.</p>
+<input id="rackName" placeholder="Rack / IDF name (optional)"><div class="row"><label class="file">Select CLI text files <input type="file" id="files" multiple accept=".txt,.log" hidden></label></div>
+<textarea id="capture" placeholder="Switch#show inventory&#10;..."></textarea><div class="row"><button id="import">Import capture</button><button class="secondary" id="demo">Load synthetic example</button></div><p id="message" role="status"></p>
+<h2>Project</h2><div class="row"><button class="secondary" id="save">Save project JSON</button><label class="file">Open project <input type="file" id="load" accept=".json" hidden></label><button class="secondary" id="csv">Export CSV</button><button class="secondary" id="print">Print report</button></div><p class="small">Data stays in this tab until you explicitly export it. No automatic discovery, login, credential storage or changes to network equipment. Rack order is initially stack member order; drag a member to correct physical order.</p>
+</section><section><h2>PoE capacity overview</h2><div id="overview"></div><div id="racks"></div><p class="small">Red: denied port or ≥98% utilized. Amber: ≥80%, PSU fault, or port fault. Green: below 80%. Gray: budget unknown. Ratings are based on reported PoE allocation, not live AC draw. An empty PSU slot inferred from inventory is not a verified electrical status.</p><h2>Upgrade review</h2><div id="review"></div><p class="small">Candidates are switches at ≥80% or with power-denied ports and fewer than two inventoried PSUs. Verify platform support, power mode, UPS/PDU capacity, and exact PSU compatibility before ordering. No projected capacity is assumed.</p></section></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let project=[];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num=x=>Number.isFinite(x)?x.toFixed(1):'—';
+function parseCisco(raw,name=''){
+ const lines=raw.replace(/\r/g,'').split('\n'), devices=new Map();
+ const get=n=>{n=Number(n);if(!devices.has(n))devices.set(n,{n,model:'Unknown',serial:'',psus:{},ports:[]});return devices.get(n)};
+ let pending=null, section='', host='';
+ for(const line of lines){
+  const prompt=line.match(/^([^\s#>]+)[#>]\s*(?:show|sh)\s+(.+)/i);
+  if(prompt){host ||= prompt[1];const cmd=prompt[2].trim();section=/^inv/i.test(cmd)?'inventory':/^power in/i.test(cmd)?'poe':/^env/i.test(cmd)?'env':/^switch$/i.test(cmd)?'switch':'';pending=null;continue}
+  let m;
+  if(section==='inventory'){
+   if(m=line.match(/^NAME:\s*"Switch (\d+)(?: - Power Supply ([AB]))?"\s*,/i)){pending={n:m[1],slot:m[2]};continue}
+   if(/^NAME:/.test(line)){pending=null;continue}
+   if(pending&&(m=line.match(/^PID:\s*([^,]+),\s*VID:\s*[^,]*,\s*SN:\s*(.*)/i))){const d=get(pending.n);if(pending.slot)d.psus[pending.slot]={pid:m[1].trim(),serial:m[2].trim(),source:'inventory'};else{d.model=m[1].trim();d.serial=m[2].trim()}pending=null}
+  }else if(section==='env'){
+   if(m=line.match(/^\s*(\d+)([AB])\s+Not Present/i)){get(m[1]).psus[m[2]]={empty:true,source:'environment'};continue}
+   if(m=line.match(/^\s*(\d+)([AB])\s+(\S+)\s+(\S+)\s+(.+?)\s+(Good|Bad|N\/A|No)\s+(Good|Bad|N\/A|No)\s+(\d+)\s*$/i)){get(m[1]).psus[m[2]]={pid:m[3],serial:m[4],status:m[5].trim(),sys:m[6],poe:m[7],watts:+m[8],source:'environment'}}
+  }else if(section==='switch'){
+   if(m=line.match(/^\s*\*?(\d+)\s+(Active|Standby|Member)\s+/i))get(m[1]).role=m[2];
+  }else if(section==='poe'){
+   if(m=line.match(/^\s*(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*$/)){Object.assign(get(m[1]),{budget:+m[2],used:+m[3],remaining:+m[4]});continue}
+   if(m=line.match(/^\s*([A-Za-z]+(\d+)\/\d+\/\d+)\s+(\S+)\s+(\S+)\s+(\d+(?:\.\d+)?)\s+(.+?)\s+(\S+)\s+(\d+(?:\.\d+)?)\s*$/)){get(m[2]).ports.push({iface:m[1],admin:m[3],oper:m[4],power:+m[5],device:m[6],class:m[7],max:+m[8]})}
+  }
+ }
+ const members=[...devices.values()].sort((a,b)=>a.n-b.n);
+ if(!members.length)throw Error('No stack members recognized. Include the CLI command prompts and relevant output.');
+ return {name:name||host||'Unnamed rack',host:host||'Unknown stack',members};
+}
+function status(d){
+ const denied=d.ports.filter(p=>/deny/i.test(p.oper)).length, fault=d.ports.some(p=>/fault/i.test(p.oper))||Object.values(d.psus).some(p=>p.status&&p.status!=='OK'||p.sys&&p.sys!=='Good'||p.poe&&p.poe!=='Good');
+ const ratio=d.budget>0?d.used/d.budget:NaN;
+ return {denied,ratio,color:denied||ratio>=.98?'#f87171':fault||ratio>=.8?'#fbbf24':Number.isFinite(ratio)?'#34d399':'#94a3b8',label:denied?'Power denied':ratio>=.98?'Critical capacity':fault?'Fault reported':ratio>=.8?'Low headroom':Number.isFinite(ratio)?'Healthy':'Unknown'};
+}
+function render(){
+ let all=project.flatMap(r=>r.members), sum=k=>all.reduce((s,d)=>s+(d[k]||0),0);
+ $('overview').innerHTML=[['Switches',all.length],['Reported PoE',num(sum('budget'))+' W'],['Allocated',num(sum('used'))+' W'],['Denied ports',all.reduce((s,d)=>s+status(d).denied,0)]].map(([k,v])=>'<div class="metric"><b>'+esc(v)+'</b>'+k+'</div>').join('');
+ $('racks').innerHTML=project.map((r,i)=>'<div class="racktitle"><input aria-label="Rack name" data-name="'+i+'" value="'+esc(r.name)+'"><button class="secondary" data-remove="'+i+'">Remove</button></div><div class="small">'+esc(r.host)+' · '+r.members.length+' members</div><div class="rack">'+r.members.map((d,j)=>{
+  const s=status(d), psu=['A','B'].map(slot=>{const p=d.psus[slot];return '<span class="psu '+(!p||p.empty?'empty':'')+'">PSU '+slot+': '+esc(p&&!p.empty?p.pid+(p.status?' · '+p.status:''):p?.empty?'Not present':'Not inventoried')+'</span>'}).join('');
+  return '<article draggable="true" class="switch" data-r="'+i+'" data-m="'+j+'" style="--status:'+s.color+'"><strong>Member '+d.n+' · '+esc(d.model)+'</strong> <span class="badge">'+s.label+'</span><div class="stats"><span>'+num(d.used)+' / '+num(d.budget)+' W</span><span>'+num(d.remaining)+' W free</span><span>'+s.denied+' denied</span><span>'+d.ports.filter(p=>p.oper==='on').length+' powered</span></div><div class="bar"><span style="width:'+Math.max(0,Math.min(100,(s.ratio||0)*100))+'%"></span></div><div class="psus">'+psu+'</div><div class="ports">'+d.ports.map(p=>'<span class="port '+(p.oper==='on'?'on':/deny/i.test(p.oper)?'deny':/fault/i.test(p.oper)?'fault':'')+'" title="'+esc(p.iface+' · '+p.oper+' · '+p.power+' W · '+p.device)+'"></span>').join('')+'</div><details><summary>Inventory & port details</summary><p>Serial: '+esc(d.serial||'Unknown')+' · Role: '+esc(d.role||'Unknown')+'</p><table><tr><th>Port</th><th>Status</th><th>W</th><th>Device</th></tr>'+d.ports.map(p=>'<tr><td>'+esc(p.iface)+'</td><td>'+esc(p.oper)+'</td><td>'+num(p.power)+'</td><td>'+esc(p.device)+'</td></tr>').join('')+'</table></details></article>'
+ }).join('')+'</div>').join('')||'<p>Import a capture to automatically generate the rack.</p>';
+ let candidates=project.flatMap(r=>r.members.filter(d=>{let s=status(d);return (s.denied||s.ratio>=.8)&&Object.values(d.psus).filter(p=>!p.empty).length<2}).map(d=>({r,d})));
+ $('review').innerHTML=candidates.length?'<table><tr><th>Rack / member</th><th>Current PSU</th><th>Remaining</th><th>Action</th></tr>'+candidates.map(({r,d})=>'<tr><td>'+esc(r.name)+' / '+d.n+'</td><td>'+esc(Object.values(d.psus).filter(p=>!p.empty).map(p=>p.pid).join(', ')||'Unknown')+'</td><td>'+num(d.remaining)+' W</td><td>Review second PSU or redistribute load</td></tr>').join('')+'</table>':'<p>No single-PSU upgrade candidates detected.</p>';
+ document.querySelectorAll('[data-name]').forEach(e=>e.onchange=()=>{project[+e.dataset.name].name=e.value;render()});
+ document.querySelectorAll('[data-remove]').forEach(e=>e.onclick=()=>{if(confirm('Remove this rack from the working project?')){project.splice(+e.dataset.remove,1);render()}});
+ document.querySelectorAll('.switch').forEach(e=>{e.ondragstart=ev=>ev.dataTransfer.setData('text/plain',e.dataset.r+':'+e.dataset.m);e.ondragover=ev=>ev.preventDefault();e.ondrop=ev=>{ev.preventDefault();let [r,m]=ev.dataTransfer.getData('text/plain').split(':').map(Number),to=+e.dataset.r,j=+e.dataset.m;if(r===to&&project[r]?.members[m]){let [d]=project[r].members.splice(m,1);project[r].members.splice(j,0,d);render()}}});
+}
+function add(raw,name){const r=parseCisco(raw,name);project.push(r);render();return r.members.length}
+function download(name,content,type){const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+function csvCell(x){let s=String(x??'');if(/^[=+@\-\t\r]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"'}
+if(typeof document!=='undefined'){
+ $('import').onclick=()=>{try{$('message').textContent='Imported '+add($('capture').value,$('rackName').value.trim())+' switches.'}catch(e){$('message').textContent=e.message}};
+ $('files').onchange=async()=>{let msgs=[];for(const f of $('files').files){try{msgs.push(f.name+': '+add(await f.text(),$('rackName').value.trim())+' switches')}catch(e){msgs.push(f.name+': '+e.message)}}$('message').textContent=msgs.join('\n');$('files').value=''};
+ $('save').onclick=()=>download('rack-poe-project.json',JSON.stringify({version:1,project},null,2),'application/json');
+ $('load').onchange=async()=>{try{const x=JSON.parse(await $('load').files[0].text());if(x.version!==1||!Array.isArray(x.project)||x.project.some(r=>!Array.isArray(r.members)||r.members.some(d=>!d.psus||!Array.isArray(d.ports)||!Number.isInteger(d.n))))throw Error('Invalid project format');project=x.project;render()}catch(e){$('message').textContent=e.message}$('load').value=''};
+ $('csv').onclick=()=>{let rows=[['Rack','Stack','Member','Model','Serial','PSU A','PSU B','Budget W','Used W','Remaining W','Denied','Status']];for(const r of project)for(const d of r.members)rows.push([r.name,r.host,d.n,d.model,d.serial,d.psus.A?.pid,d.psus.B?.pid,d.budget,d.used,d.remaining,status(d).denied,status(d).label]);download('rack-poe.csv',rows.map(r=>r.map(csvCell).join(',')).join('\n'),'text/csv')};
+ $('print').onclick=()=>window.print();
+ $('demo').onclick=()=>{const s='DEMO#show inventory\nNAME: "Switch 1", DESCR: "C9200L"\nPID: C9200L-48P-4X, VID: V01, SN: DEMO1\nNAME: "Switch 1 - Power Supply A", DESCR: "PSU"\nPID: PWR-C5-1KWAC, VID: V01, SN: DEMOPSU\nDEMO#show power inline\n1 740.0 739.7 0.3\nGi1/0/1 auto on 30.0 Camera 4 30.0\nGi1/0/2 auto power-deny 0.0 n/a n/a 30.0';add(s,'Example rack')};
+ render();
+}
+</script></html>
